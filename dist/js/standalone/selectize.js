@@ -1429,6 +1429,11 @@
 				},
 				'option_create': function(data, escape) {
 					return '<div class="create">Add <strong>' + escape(data.input) + '</strong>&hellip;</div>';
+				},
+				'option_custom': function(data, escape) {
+					var customStyle = data.lastItem ? 'border-bottom: 1px solid #ccc;' : '';
+					return '<div class="custom" data-id=' + escape(data.id) + '' + (customStyle ? ' style="' + escape(customStyle) + '"' : '')
+					        + '>' + escape(data.prefix) + ' <strong>' + escape(data.input) + '</strong>&hellip;</div>';
 				}
 			};
 	
@@ -1699,8 +1704,23 @@
 			var self = this;
 			var fn = self.settings.load;
 			if (!fn) return;
-			if (self.loadedSearches.hasOwnProperty(value)) return;
-			self.loadedSearches[value] = true;
+			if (self.settings.remoteSearchOnly) {
+				// Clear non-selected items here!
+				var selection = self.getValue();
+				if (!selection) selection = [];
+				if (!$.isArray(selection)) selection = [selection];
+
+				Object.keys(self.options).forEach(function(value) {
+					if (selection.indexOf(value) === -1) {
+						self.removeOption(value, true);
+					}
+				});
+				self.clearCache();
+				self.loadedSearches = {};
+			} else {
+				if (self.loadedSearches.hasOwnProperty(value)) return;
+				self.loadedSearches[value] = true;
+			}
 			self.load(function(callback) {
 				fn.apply(self, [value, callback]);
 			});
@@ -1814,6 +1834,12 @@
 						self.close();
 					}
 				});
+			} else if ($target.hasClass('custom')) {
+				self.customItem(null, $target.attr('data-id'), function() {
+					if (self.settings.closeAfterCustom) {
+						self.close();
+					}
+				});
 			} else {
 				value = $target.attr('data-value');
 				if (typeof value !== 'undefined') {
@@ -1825,6 +1851,11 @@
 					} else if (!self.settings.hideSelected && e.type && /mouse/.test(e.type)) {
 						self.setActiveOption(self.getOption(value));
 					}
+
+					// My custom code: update results here!
+					self.lastValue = '';
+					self.onSearchChange('');
+					self.refreshOptions();
 				}
 			}
 		},
@@ -1858,16 +1889,21 @@
 			var $wrapper = self.$wrapper.addClass(self.settings.loadingClass);
 	
 			self.loading++;
-			fn.apply(self, [function(results) {
+			fn.apply(self, [function(results, query) {
 				self.loading = Math.max(self.loading - 1, 0);
-				if (results && results.length) {
-					self.addOption(results);
-					self.refreshOptions(self.isFocused && !self.isInputHidden);
+				// My custom changes: if query has changed in the mean time, throw away results...
+				if ((query !== null) && self.lastValue !== query) {
+					// Do nothing here...
+				} else {
+					if (results && results.length) {
+						self.addOption(results);
+						self.refreshOptions(self.isFocused && !self.isInputHidden);
+					}
+					self.trigger('load', results);
 				}
 				if (!self.loading) {
 					$wrapper.removeClass(self.settings.loadingClass);
 				}
-				self.trigger('load', results);
 			}]);
 		},
 	
@@ -2170,7 +2206,7 @@
 		 */
 		refreshOptions: function(triggerDropdown) {
 			var i, j, k, n, groups, groups_order, option, option_html, optgroup, optgroups, html, html_children, has_create_option;
-			var $active, $active_before, $create;
+			var $active, $active_before, $create, $firstCustom, $lastCustom;
 	
 			if (typeof triggerDropdown === 'undefined') {
 				triggerDropdown = true;
@@ -2256,6 +2292,21 @@
 					self.getOption(self.items[i]).addClass('selected');
 				}
 			}
+
+			// add custom options
+			// NOTE: will be displayed AFTER "Add" in the list - therefore we prepend them first
+			var customList = self.settings.customList;
+			if (customList && customList.length > 0) {
+				for (i = customList.length - 1; i >= 0; i--) {
+					var entry = customList[i];
+					var isLast = (i == customList.length - 1);
+					var lastCustomItemBeforeResults = isLast && results.items.length > 0;
+					$dropdown_content.prepend(self.render('option_custom', {id: entry.id, prefix: entry.prefix, input: query, lastItem: lastCustomItemBeforeResults}));
+					var $node = $($dropdown_content[0].childNodes[0]);
+					if (i == 0) $firstCustom = $node;
+					if (isLast) $lastCustom = $node;
+				}
+			}
 	
 			// add create option
 			has_create_option = self.canCreate(query);
@@ -2263,9 +2314,9 @@
 				$dropdown_content.prepend(self.render('option_create', {input: query}));
 				$create = $($dropdown_content[0].childNodes[0]);
 			}
-	
+
 			// activate
-			self.hasOptions = results.items.length > 0 || has_create_option;
+			self.hasOptions = results.items.length > 0 || has_create_option || $lastCustom;
 			if (self.hasOptions) {
 				if (results.items.length > 0) {
 					$active_before = active_before && self.getOption(active_before);
@@ -2275,14 +2326,22 @@
 						$active = self.getOption(self.items[0]);
 					}
 					if (!$active || !$active.length) {
-						if ($create && !self.settings.addPrecedence) {
-							$active = self.getAdjacentOption($create, 1);
+						if (($create || $lastCustom) && !self.settings.addPrecedence) {
+							if ($lastCustom) {
+								$active = self.getAdjacentOption($lastCustom, 1);
+							} else {
+								$active = self.getAdjacentOption($create, 1);
+							}
 						} else {
 							$active = $dropdown_content.find('[data-selectable]:first');
 						}
 					}
 				} else {
-					$active = $create;
+					if ($create) {
+						$active = $create;
+					} else {
+						$active = $firstCustom;
+					}
 				}
 				self.setActiveOption($active);
 				if (triggerDropdown && !self.isOpen) { self.open(); }
@@ -2614,7 +2673,18 @@
 					} else {
 						self.positionDropdown();
 					}
-	
+
+					// Set custom item background color
+					if (self.settings.customItemTextColor) {
+						$item.css('color', self.settings.customItemTextColor);
+					}
+					if (self.settings.customItemBgColor) {
+						$item.css('background-color', self.settings.customItemBgColor);
+					}
+					if (self.settings.customItemBorderColor) {
+						$item.css('border-color', self.settings.customItemBorderColor);
+					}
+
 					self.updatePlaceholder();
 					self.trigger('item_add', value, $item);
 					self.updateOriginalInput({silent: silent});
@@ -2720,6 +2790,57 @@
 				create(output);
 			}
 	
+			return true;
+		},
+	
+		/**
+		 * Invokes the `custom` method provided in the
+		 * selectize options that can provide the data
+		 * for the new item, given the user input.
+		 *
+		 * Once this completes, it will be added
+		 * to the item list.
+		 *
+		 * @param {string} value
+		 * @param {boolean} [triggerDropdown]
+		 * @param {function} [callback]
+		 * @return {boolean}
+		 */
+		customItem: function(input, customId, triggerDropdown) {
+			var self  = this;
+			var caret = self.caretPos;
+			input = input || $.trim(self.$control_input.val() || '');
+	
+			var callback = arguments[arguments.length - 1];
+			if (typeof callback !== 'function') callback = function() {};
+	
+			if (typeof triggerDropdown !== 'boolean') {
+				triggerDropdown = true;
+			}
+	
+			if (typeof self.settings.custom !== 'function') return;
+
+			self.lock();
+
+			var create = once(function(data) {
+				self.unlock();
+	
+				if (!data || typeof data !== 'object') return callback();
+				var value = hash_key(data[self.settings.valueField]);
+				if (typeof value !== 'string') return callback();
+	
+				self.setTextboxValue('');
+				self.addOption(data);
+				self.setCaret(caret);
+				self.addItem(value);
+				self.refreshOptions(triggerDropdown && self.settings.mode !== 'single');
+				callback(data);
+			});
+
+			var output = this.settings.custom.apply(this, [input, customId, create]);
+			if (typeof output !== 'undefined') {
+				create(output);
+			}
 			return true;
 		},
 	
@@ -3195,7 +3316,7 @@
 				value = hash_key(data[self.settings.valueField]);
 				cache = !!value;
 			}
-	
+
 			// pull markup from cache if it exists
 			if (cache) {
 				if (!isset(self.renderCache[templateName])) {
@@ -3210,7 +3331,8 @@
 			html = $(self.settings.render[templateName].apply(this, [data, escape_html]));
 	
 			// add mandatory attributes
-			if (templateName === 'option' || templateName === 'option_create') {
+			if (templateName === 'option' || templateName === 'option_create'
+					|| templateName === 'option_custom') {
 				html.attr('data-selectable', '');
 			}
 			else if (templateName === 'optgroup') {
@@ -3276,6 +3398,8 @@
 		persist: true,
 		diacritics: true,
 		create: false,
+		customList: [],
+		custom: null,
 		createOnBlur: false,
 		createFilter: null,
 		highlight: true,
@@ -3288,6 +3412,11 @@
 		preload: false,
 		allowEmptyOption: false,
 		closeAfterSelect: false,
+		closeAfterCustom: true,
+		remoteSearchOnly: false,
+		customItemBgColor: null,
+		customItemTextColor: null,
+		customItemBorderColor: null,
 	
 		scrollDuration: 60,
 		loadThrottle: 300,
@@ -3341,7 +3470,8 @@
 			optgroup: null,
 			optgroup_header: null,
 			option: null,
-			option_create: null
+			option_create: null,
+			option_custom: null
 			*/
 		}
 	};
